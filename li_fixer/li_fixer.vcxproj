@@ -162,6 +162,7 @@
     <ClInclude Include="capstone\include\platform.h" />
     <ClInclude Include="capstone\include\windowsce\intrin.h" />
     <ClInclude Include="capstone\include\windowsce\stdint.h" />
+    <ClInclude Include="FNVDatabase.h" />
     <ClInclude Include="keystone\include\keystone\arm.h" />
     <ClInclude Include="keystone\include\keystone\arm64.h" />
     <ClInclude Include="keystone\include\keystone\evm.h" />

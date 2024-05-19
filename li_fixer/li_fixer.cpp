@@ -11,6 +11,10 @@
 #include <capstone/capstone.h>
 #include "loguru/loguru.hpp"
 
+#include "FNVDatabase.h"
+
+#pragma comment(lib, "urlmon.lib")
+
 #define PE_FILE_BUFFER char*
 #define LIFX_SECTION_SIZE 0x10000
 
@@ -19,15 +23,16 @@ bool LoguruSetup = false;
 bool ParamsSetup = false;
 bool FNVDatabaseSetup = false;
 size_t GlobalFunctionCount = 0;
-int LiFNVConstant = 0;
-std::string LiFNVDatabasePath = "";
 std::ifstream LiFNVDatabaseFile;
 
 // Global input arguments.
 std::string InFilePath;
 std::string OutFilePath;
 std::string FunctionFilePath;
+std::string LiFNVDatabasePath;
 bool Verbose;
+int LiFNVConstant;
+bool NoMissingFix;
 
 // Functions for IDA Python script.
 struct FunctionName
@@ -256,6 +261,7 @@ void SetupFNVDatabase()
     if (LiFNVDatabaseFile.is_open() == false)
     {
         std::string ErrorMessage = "Failed to open FNV database file: " + LiFNVDatabasePath;
+        ErrorMessage += "\nYou can automatically download the FNV database by removing the -nomissingfix argument.";
         Error(ErrorMessage);
     }
 
@@ -267,22 +273,26 @@ void ParseArguments(int argc, char** argv)
     Parser.add_argument("-infile")
         .help("Path to binary with LazyImports.")
         .required();
-    Parser.add_argument("-output")
+    Parser.add_argument("-outfile")
         .help("Path to save the patched binary to.")
-        .required();
+        .default_value("li_fixer_patched.bin");
     Parser.add_argument("-functions")
         .help("Path to save function rename data. (Interpreted by IDA Python script to rename functions)")
-        .required();
+        .default_value("li_fixer_functions.txt");
     Parser.add_argument("-fnvdatabase")
-        .help("Path to the FNV database file, contains a list of all possible FNV passwords (DLL export names). (Default: lifnv.txt)")
-        .default_value("lifnv.txt");
+        .help("Path to the FNV database file, contains a list of all possible FNV passwords (DLL export names). (Default: li_fnvdatabase.txt)")
+        .default_value("li_fixer_fnvdatabase.txt");
+    Parser.add_argument("-fnvconst")
+        .help("Constant for the FNV hash function.")
+        .default_value(16777619);
     Parser.add_argument("-verbose")
         .help("Enable verbose logging.")
         .default_value(false)
         .implicit_value(true);
-    Parser.add_argument("-fnvconst")
-        .help("Constant for the FNV hash function.")
-        .default_value(16777619);
+    Parser.add_argument("-nomissingfix")
+        .help("Disables automatically writing the FNV database and IDA Python script. (if they are missing)")
+        .default_value(false)
+        .implicit_value(true);
 
     try
     {
@@ -295,14 +305,15 @@ void ParseArguments(int argc, char** argv)
     }
 
     InFilePath = Parser.get<std::string>("-infile");
-    OutFilePath = Parser.get<std::string>("-output");
+    OutFilePath = Parser.get<std::string>("-outfile");
     FunctionFilePath = Parser.get<std::string>("-functions");
     LiFNVDatabasePath = Parser.get<std::string>("-fnvdatabase");
-    Verbose = Parser.get<bool>("-verbose");
     LiFNVConstant = Parser.get<int>("-fnvconst");
+    Verbose = Parser.get<bool>("-verbose");
+    NoMissingFix = Parser.get<bool>("-nomissingfix");
 
     if (InFilePath.empty()) Error("Input file path is empty!");
-    if (OutFilePath.empty()) Error("Output file path is empty!");
+    if (OutFilePath.empty()) Error("Out file path is empty!");
     if (FunctionFilePath.empty()) Error("Function file path is empty!");
     if (LiFNVDatabasePath.empty()) Error("FNV database path is empty!");
 
@@ -399,6 +410,66 @@ bool IsMovRegisterImm(cs_insn* Instruction)
     return true;
 }
 
+// Helper functions.
+void DetectMissingFiles()
+{
+    if (ParamsSetup == false || LoguruSetup == false)
+        Error("You must setup parameters, loguru, and the FNV database before calling DetectAndDownload()!");
+
+    // Check if the FNV database exists.
+    std::ifstream FNVDatabaseFile(LiFNVDatabasePath);
+    if (FNVDatabaseFile.is_open() == false)
+    {
+        LOG_F(INFO, "FNV database not found, downloading...");
+
+        std::ofstream FNVDatabaseFile(LiFNVDatabasePath, std::ios_base::binary);
+        FNVDatabaseFile << RawFNVDatabase;
+        FNVDatabaseFile.close();
+
+        LOG_F(INFO, "FNV database downloaded to: %s", LiFNVDatabasePath.c_str());
+    }
+
+    // Check if the IDA Python script exists.
+    std::ifstream IDAPythonScriptFile("li_fixer_ida.py");
+    if (IDAPythonScriptFile.is_open() == false)
+    {
+        LOG_F(INFO, "IDA Python script not found, downloading...");
+
+        // Download the IDA Python script.
+        std::string IDAPythonScript = R"(
+import idaapi
+import ida_kernwin
+
+def RenameFunctions(FilePath):
+    with open(FilePath, 'r') as file:
+        # Check if the first line is equal to the magic number
+        MagicNumber = file.readline().strip()
+        if MagicNumber != "li_fixer":
+            ida_kernwin.error("The file is not a valid li_fixer output.")
+            return
+
+        for line in file:
+            FunctionName, Address = line.strip().split(',')
+            Address = int(Address, 16)
+            Address += idaapi.get_imagebase()
+            idaapi.set_name(Address, FunctionName)
+            print(f"Renamed function at 0x{Address:08X} to {FunctionName}")
+
+FilePath = ida_kernwin.ask_file(0, "*.txt", "Please select the functions file that li_fixer generated.")
+if FilePath:
+    RenameFunctions(FilePath)
+else:
+    ida_kernwin.error("No file selected.")
+)";
+
+        std::ofstream IDAPythonScriptFile("li_fixer_ida.py");
+        IDAPythonScriptFile << IDAPythonScript;
+        IDAPythonScriptFile.close();
+
+        LOG_F(INFO, "IDA Python script saved to: li_fixer_ida.py");
+    }
+}
+
 
 
 
@@ -412,10 +483,12 @@ int main(int argc, char** argv)
     LOG_F(INFO, "Output file: %s", OutFilePath.c_str());
     LOG_F(INFO, "Function file: %s", FunctionFilePath.c_str());
     LOG_F(INFO, "FNV database: %s", LiFNVDatabasePath.c_str());
-    LOG_F(INFO, "Verbose: %s", Verbose ? "true" : "false");
     LOG_F(INFO, "FNV constant: %d", LiFNVConstant);
+    LOG_F(INFO, "Verbose: %s", Verbose ? "true" : "false");
+    LOG_F(INFO, "No missing fix: %s", NoMissingFix ? "true" : "false");
     LOG_F(INFO, "");
 
+    if (NoMissingFix == false) DetectMissingFiles();
     SetupFNVDatabase();
 
     size_t InFileSize;
@@ -590,7 +663,7 @@ int main(int argc, char** argv)
                 }
                 else
                 {
-                    LOG_F(INFO, "Decrypted LazyImport: %s", DecryptedFunctionName.c_str());
+                    LOG_F(INFO, "Decrypted LazyImport: %s at 0x%08X", DecryptedFunctionName.c_str(), (NOPStartBoundInstruction->address + CodeSectionVirtualOffset));
                 }
 
                 // Now we can insert the decrypted function into the .lifx section
@@ -706,34 +779,3 @@ int main(int argc, char** argv)
 
     return 0;
 }
-
-
-
-
-
-// IDA Python script to rename the functions.
-/*
-import idaapi
-import ida_kernwin
-
-def RenameFunctions(FilePath):
-    with open(FilePath, 'r') as file:
-        # Check if the first line is equal to the magic number
-        MagicNumber = file.readline().strip()
-        if MagicNumber != "li_fixer":
-            ida_kernwin.error("The file is not a valid li_fixer output.")
-            return
-
-        for line in file:
-            FunctionName, Address = line.strip().split(',')
-            Address = int(Address, 16)
-            Address += idaapi.get_imagebase()
-            idaapi.set_name(Address, FunctionName)
-            print(f"Renamed function at 0x{Address:08X} to {FunctionName}")
-
-FilePath = ida_kernwin.ask_file(0, "*.txt", "Please select the functions file that li_fixer generated.")
-if FilePath:
-    RenameFunctions(FilePath)
-else:
-    ida_kernwin.error("No file selected.")
-*/

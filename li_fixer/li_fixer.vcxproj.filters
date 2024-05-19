@@ -128,5 +128,8 @@
     <ClInclude Include="capstone\include\platform.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="FNVDatabase.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
 </Project>
