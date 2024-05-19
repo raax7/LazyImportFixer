@@ -12,12 +12,16 @@
 #include "loguru/loguru.hpp"
 
 #define PE_FILE_BUFFER char*
-#define LIFX_SECTION_SIZE 0x16000
+#define LIFX_SECTION_SIZE 0x10000
 
 // Global variables.
 bool LoguruSetup = false;
 bool ParamsSetup = false;
+bool FNVDatabaseSetup = false;
 size_t GlobalFunctionCount = 0;
+int LiFNVConstant = 0;
+std::string LiFNVDatabasePath = "";
+std::ifstream LiFNVDatabaseFile;
 
 // Global input arguments.
 std::string InFilePath;
@@ -243,6 +247,20 @@ void SetupLoguru()
 
     LoguruSetup = true;
 }
+void SetupFNVDatabase()
+{
+    if (ParamsSetup == false)
+        Error("You must setup parameters before calling SetupFNVDatabase()!");
+
+    LiFNVDatabaseFile.open(LiFNVDatabasePath);
+    if (LiFNVDatabaseFile.is_open() == false)
+    {
+        std::string ErrorMessage = "Failed to open FNV database file: " + LiFNVDatabasePath;
+        Error(ErrorMessage);
+    }
+
+    FNVDatabaseSetup = true;
+}
 void ParseArguments(int argc, char** argv)
 {
     argparse::ArgumentParser Parser("li_fixer");
@@ -255,10 +273,16 @@ void ParseArguments(int argc, char** argv)
     Parser.add_argument("-functions")
         .help("Path to save function rename data. (Interpreted by IDA Python script to rename functions)")
         .required();
+    Parser.add_argument("-fnvdatabase")
+        .help("Path to the FNV database file, contains a list of all possible FNV passwords (DLL export names). (Default: lifnv.txt)")
+        .default_value("lifnv.txt");
     Parser.add_argument("-verbose")
         .help("Enable verbose logging.")
         .default_value(false)
         .implicit_value(true);
+    Parser.add_argument("-fnvconst")
+        .help("Constant for the FNV hash function.")
+        .default_value(16777619);
 
     try
     {
@@ -273,11 +297,14 @@ void ParseArguments(int argc, char** argv)
     InFilePath = Parser.get<std::string>("-infile");
     OutFilePath = Parser.get<std::string>("-output");
     FunctionFilePath = Parser.get<std::string>("-functions");
+    LiFNVDatabasePath = Parser.get<std::string>("-fnvdatabase");
     Verbose = Parser.get<bool>("-verbose");
+    LiFNVConstant = Parser.get<int>("-fnvconst");
 
     if (InFilePath.empty()) Error("Input file path is empty!");
     if (OutFilePath.empty()) Error("Output file path is empty!");
     if (FunctionFilePath.empty()) Error("Function file path is empty!");
+    if (LiFNVDatabasePath.empty()) Error("FNV database path is empty!");
 
     ParamsSetup = true;
 }
@@ -308,54 +335,23 @@ bool FNV(const char* PotentialFunctionName, int MagicNum1, int MagicNum2, int Ma
 }
 std::string DecrpytLazyImport(int MagicNum1, int MagicNum2)
 {
-    static bool Setup = false;
-    static std::vector<std::string> files;
-    if (Setup == false)
+    if (FNVDatabaseSetup == false || LiFNVDatabaseFile.is_open() == false)
+        Error("You must setup the FNV database before calling DecrpytLazyImport()!");
+
+    // Reset the file to the beginning.
+    LiFNVDatabaseFile.clear();
+    LiFNVDatabaseFile.seekg(0, std::ios::beg);
+
+    std::string CurrentLine;
+    while (std::getline(LiFNVDatabaseFile, CurrentLine))
     {
-        // output the current directory
-        char currentDirectory[MAX_PATH];
-        GetCurrentDirectoryA(MAX_PATH, currentDirectory);
-        std::cout << "Current directory: " << currentDirectory << std::endl;
-
-        // Get every .txt file in the current directory
-        WIN32_FIND_DATAA FindFileData;
-        HANDLE hFind = FindFirstFileA("*.txt", &FindFileData);
-        if (hFind == INVALID_HANDLE_VALUE)
+        if (FNV(CurrentLine.c_str(), MagicNum1, LiFNVConstant, MagicNum2))
         {
-            std::cout << "No .txt files found in the current directory" << std::endl;
-            return "";
+            return CurrentLine;
         }
-
-        do
-        {
-            files.push_back(FindFileData.cFileName);
-        } while (FindNextFileA(hFind, &FindFileData));
-
-        FindClose(hFind);
-
-        Setup = true;
     }
 
-    // Itterate over ever .txt file and then every line in the file,
-    // and check if the line is the correct password
-    for (const auto& file : files)
-    {
-        std::ifstream fileStream(file);
-        if (fileStream.is_open() == false)
-        {
-            std::cout << "Failed to open file: " << file << std::endl;
-            continue;
-        }
-
-        std::string line;
-        while (std::getline(fileStream, line))
-        {
-            if (FNV(line.c_str(), MagicNum1, 16777619, MagicNum2))
-            {
-                return line;
-            }
-        }
-    }
+    return "";
 }
 
 // Instruction matching functions.
@@ -415,8 +411,12 @@ int main(int argc, char** argv)
     LOG_F(INFO, "Input file: %s", InFilePath.c_str());
     LOG_F(INFO, "Output file: %s", OutFilePath.c_str());
     LOG_F(INFO, "Function file: %s", FunctionFilePath.c_str());
+    LOG_F(INFO, "FNV database: %s", LiFNVDatabasePath.c_str());
     LOG_F(INFO, "Verbose: %s", Verbose ? "true" : "false");
+    LOG_F(INFO, "FNV constant: %d", LiFNVConstant);
     LOG_F(INFO, "");
+
+    SetupFNVDatabase();
 
     size_t InFileSize;
     PE_FILE_BUFFER InFileBuffer = ReadFile(InFilePath, &InFileSize);
@@ -699,6 +699,9 @@ int main(int argc, char** argv)
     function_file.close();
 
     LOG_F(INFO, "Function file written to: %s", FunctionFilePath.c_str());
+
+    LiFNVDatabaseFile.close();
+
     LOG_F(INFO, "li_fixer finished!");
 
     return 0;

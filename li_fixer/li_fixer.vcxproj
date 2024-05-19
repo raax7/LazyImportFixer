@@ -139,6 +139,39 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="argparse\argparse.hpp" />
+    <ClInclude Include="capstone\include\capstone\arm.h" />
+    <ClInclude Include="capstone\include\capstone\arm64.h" />
+    <ClInclude Include="capstone\include\capstone\bpf.h" />
+    <ClInclude Include="capstone\include\capstone\capstone.h" />
+    <ClInclude Include="capstone\include\capstone\evm.h" />
+    <ClInclude Include="capstone\include\capstone\m680x.h" />
+    <ClInclude Include="capstone\include\capstone\m68k.h" />
+    <ClInclude Include="capstone\include\capstone\mips.h" />
+    <ClInclude Include="capstone\include\capstone\mos65xx.h" />
+    <ClInclude Include="capstone\include\capstone\platform.h" />
+    <ClInclude Include="capstone\include\capstone\ppc.h" />
+    <ClInclude Include="capstone\include\capstone\riscv.h" />
+    <ClInclude Include="capstone\include\capstone\sh.h" />
+    <ClInclude Include="capstone\include\capstone\sparc.h" />
+    <ClInclude Include="capstone\include\capstone\systemz.h" />
+    <ClInclude Include="capstone\include\capstone\tms320c64x.h" />
+    <ClInclude Include="capstone\include\capstone\tricore.h" />
+    <ClInclude Include="capstone\include\capstone\wasm.h" />
+    <ClInclude Include="capstone\include\capstone\x86.h" />
+    <ClInclude Include="capstone\include\capstone\xcore.h" />
+    <ClInclude Include="capstone\include\platform.h" />
+    <ClInclude Include="capstone\include\windowsce\intrin.h" />
+    <ClInclude Include="capstone\include\windowsce\stdint.h" />
+    <ClInclude Include="keystone\include\keystone\arm.h" />
+    <ClInclude Include="keystone\include\keystone\arm64.h" />
+    <ClInclude Include="keystone\include\keystone\evm.h" />
+    <ClInclude Include="keystone\include\keystone\hexagon.h" />
+    <ClInclude Include="keystone\include\keystone\keystone.h" />
+    <ClInclude Include="keystone\include\keystone\mips.h" />
+    <ClInclude Include="keystone\include\keystone\ppc.h" />
+    <ClInclude Include="keystone\include\keystone\sparc.h" />
+    <ClInclude Include="keystone\include\keystone\systemz.h" />
+    <ClInclude Include="keystone\include\keystone\x86.h" />
     <ClInclude Include="loguru\loguru.hpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
