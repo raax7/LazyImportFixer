@@ -16,7 +16,6 @@
 #pragma comment(lib, "urlmon.lib")
 
 #define PE_FILE_BUFFER char*
-#define LIFX_SECTION_SIZE 0x10000
 
 // Global variables.
 bool LoguruSetup = false;
@@ -33,6 +32,7 @@ std::string LiFNVDatabasePath;
 bool Verbose;
 int LiFNVConstant;
 bool NoMissingFix;
+int LifxSectionSize;
 
 // Functions for IDA Python script.
 struct FunctionName
@@ -285,6 +285,9 @@ void ParseArguments(int argc, char** argv)
     Parser.add_argument("-fnvconst")
         .help("Constant for the FNV hash function.")
         .default_value(16777619);
+    Parser.add_argument("-lifxsectionsize")
+        .help("Size of the .lifx section. If you're binary has many LazyImports, you should increase this size.")
+        .default_value(0x1000);
     Parser.add_argument("-verbose")
         .help("Enable verbose logging.")
         .default_value(false)
@@ -309,6 +312,7 @@ void ParseArguments(int argc, char** argv)
     FunctionFilePath = Parser.get<std::string>("-functions");
     LiFNVDatabasePath = Parser.get<std::string>("-fnvdatabase");
     LiFNVConstant = Parser.get<int>("-fnvconst");
+    LifxSectionSize = Parser.get<int>("-lifxsectionsize");
     Verbose = Parser.get<bool>("-verbose");
     NoMissingFix = Parser.get<bool>("-nomissingfix");
 
@@ -484,6 +488,7 @@ int main(int argc, char** argv)
     LOG_F(INFO, "Function file: %s", FunctionFilePath.c_str());
     LOG_F(INFO, "FNV database: %s", LiFNVDatabasePath.c_str());
     LOG_F(INFO, "FNV constant: %d", LiFNVConstant);
+    LOG_F(INFO, "LiFx section size: 0x%08X", LifxSectionSize);
     LOG_F(INFO, "Verbose: %s", Verbose ? "true" : "false");
     LOG_F(INFO, "No missing fix: %s", NoMissingFix ? "true" : "false");
     LOG_F(INFO, "");
@@ -502,11 +507,11 @@ int main(int argc, char** argv)
     // this way we can easily see all XREFs to the LazyImports.
     size_t LazyFixerSectionOffset;
     size_t LazyFixerVirtualSectionOffset;
-    if ((LazyFixerSectionOffset = CreateNewSection(&InFileBuffer, LIFX_SECTION_SIZE, ".lifx", &LazyFixerVirtualSectionOffset)) == -1)
+    if ((LazyFixerSectionOffset = CreateNewSection(&InFileBuffer, LifxSectionSize, ".lifx", &LazyFixerVirtualSectionOffset)) == -1)
         Error("Failed to create new section!");
 
     // Adjust the file size to account for the new section.
-    InFileSize += LIFX_SECTION_SIZE;
+    InFileSize += LifxSectionSize;
 
     LOG_F(MAX, "Created new section at offset: 0x%08X (Virtual Offset: 0x%08X", LazyFixerSectionOffset, LazyFixerVirtualSectionOffset);
 
@@ -685,7 +690,7 @@ int main(int argc, char** argv)
                 // We need to create a new dummy function for it.
                 if (FunctionExists == false)
                 {
-                    size_t DummyFunctionOffset = CreateEmptyFunction(InFileBuffer, LazyFixerSectionOffset, LIFX_SECTION_SIZE);
+                    size_t DummyFunctionOffset = CreateEmptyFunction(InFileBuffer, LazyFixerSectionOffset, LifxSectionSize);
                     if (DummyFunctionOffset == -1)
                         Error("Failed to create dummy function!");
 
@@ -712,17 +717,54 @@ int main(int argc, char** argv)
 
 
         // Section 4: Write the new instructions.
+
+        // Move everything between the NOP end bound and the call instruction BACKWARDS 32 bytes.
+        // This is to make room for the new instruction that will reference the dummy function.
+// Calculate the size of the block to move (from the end of NOP to the call instruction)
+        size_t MoveSize = (CallRegisterInstruction->address /*+ CallRegisterInstruction->size*/) - NOPEndBoundInstruction->address;
+        MoveSize += NOPEndBoundInstruction->size;
+
+
+        // Calculate source and destination addresses
+        char* Source = (char*)InFileBuffer + NOPEndBoundInstruction->address + CodeSectionOffset;
+        char* Destination = Source - 64;
+
+        // Move the bytes back manually
+        for (size_t i = 1; i < MoveSize; i++)
+        {
+            Destination[i] = Source[i];
+        }
+
+        // Log the moved bytes
+        for (size_t i = 0; i < MoveSize; i++)
+        {
+            LOG_F(INFO, "0x%02X", (unsigned char)Destination[i]);
+        }
+
+        // Fill the new space created with NOPs
+        for (size_t i = 0; i < MoveSize; i++)
+        {
+            Source[i] = 0x90;
+        }
+
+        LOG_F(INFO, "NOPEndBoundInstruction->address: 0x%llX", NOPEndBoundInstruction->address + CodeSectionVirtualOffset);
+        LOG_F(INFO, "CallRegisterInstruction->address: 0x%llX", CallRegisterInstruction->address + CodeSectionVirtualOffset);
+        LOG_F(INFO, "MoveSize: 0x%llX", MoveSize);
+        LOG_F(INFO, "Source: 0x%p", Source - InFileBuffer - CodeSectionOffset + CodeSectionVirtualOffset);
+        LOG_F(INFO, "Destination: 0x%p", Destination - InFileBuffer - CodeSectionOffset + CodeSectionVirtualOffset);
+
+
         // Write the instruction to reference the dummy function.
 
         // Calculate the address of the call instruction
-        uint64_t VirtualAddress = (uint64_t)((uint8_t*)NOPEndBoundInstruction->address + CodeSectionVirtualOffset);
-        VirtualAddress -= 32;
+        uint64_t VirtualAddress = (uint64_t)((Destination - InFileBuffer) + MoveSize - CallRegisterInstruction->size);
+        VirtualAddress -= CodeSectionOffset;
+        VirtualAddress += CodeSectionVirtualOffset;
+
+        LOG_F(INFO, "VirtualAddress: 0x%llX", VirtualAddress);
 
         // Reference the dummy function (preferably without calling it)
-        std::string Asm = "push rax";
-        Asm += " ; lea rax, qword ptr [" + std::to_string(DummyFunctionVirtualOffset) + "]";
-        Asm += " ; call rax";
-        Asm += " ; pop rax";
+        std::string Asm = "call " + std::to_string(DummyFunctionVirtualOffset);
 
         // Assemble the instruction
         unsigned char* Encoding;
@@ -738,10 +780,60 @@ int main(int argc, char** argv)
         LOG_F(MAX, "Assembled instruction: %s", Asm.c_str());
 
         // Write the new instruction to the buffer.
-        memcpy((char*)InFileBuffer + (NOPEndBoundInstruction->address +  CodeSectionOffset) - 32, Encoding, EncodingSize);
+        memcpy(Destination + MoveSize - CallRegisterInstruction->size, Encoding, EncodingSize);
 
         // Free the encoding.
         ks_free(Encoding);
+
+
+
+        // Loop over the moved instructions and adjust any relative addresses.
+        for (int It = NOPEndBoundIndex; It < CallRegisterIndex; It++)
+        {
+            cs_insn* Instruction = &Instructions[It];
+
+            // Check if the instruction references a memory address.
+            for (int OpIt = 0; OpIt < Instruction->detail->x86.op_count; OpIt++)
+            {
+                if (Instruction->detail->x86.operands[OpIt].type == X86_OP_MEM)
+                {
+#if 0
+                    if (Instruction->detail->x86.operands[OpIt].mem.base == X86_REG_RIP)
+                    {
+                        // Calculate the new address.
+                        uint64_t NewAddress = Instruction->detail->x86.operands[OpIt].mem.disp - 64;
+                        NewAddress += VirtualAddress;
+
+                        // Write the new address to the buffer.
+                        char* Address = (char*)InFileBuffer + (Instruction->address + CodeSectionOffset) - 64;
+                        Address += Instruction->detail->x86.operands[OpIt].mem.disp;
+                        //Address += 0x40;
+
+                        *(uint64_t*)Address = NewAddress;
+
+                        Address = (char*)(Address - InFileBuffer) - CodeSectionOffset + CodeSectionVirtualOffset;
+
+                        LOG_F(INFO, "Adjusted relative address at 0x%08X to 0x%08X", Address, NewAddress);
+                    }
+
+                    // Calculate the new address.
+                    uint64_t NewAddress = Instruction->detail->x86.operands[0].mem.disp - 64;
+                    NewAddress += VirtualAddress;
+
+                    // Write the new address to the buffer.
+                    char* Address = (char*)InFileBuffer + (Instruction->address + CodeSectionOffset) - 64;
+                    Address += Instruction->detail->x86.operands[0].mem.disp;
+                    //Address += 0x40;
+
+                    *(uint64_t*)Address = NewAddress;
+
+                    Address = (char*)(Address - InFileBuffer) - CodeSectionOffset + CodeSectionVirtualOffset;
+
+                    LOG_F(INFO, "Adjusted relative address at 0x%08X to 0x%08X", Address, NewAddress);
+#endif
+                }
+            }
+        }
     }
 
     LOG_F(INFO, "-------------------------------------------------");
